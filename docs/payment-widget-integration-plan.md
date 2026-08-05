@@ -1,0 +1,40 @@
+# 토스페이먼츠 결제위젯(v2, 주문서형) 연동 계획 — 요약
+
+## 배경
+`payments`는 Spring Boot 4.1.0 / Java 21의 빈 스켈레톤. 결제 정상/실패/취소/이탈 흐름 전반과, 그 과정에서 **결제 상태·재고·금액의 정합성**을 최소 범위로 구현하는 것이 목표.
+
+**합의된 스코프**: 회원=고정 임시 Buyer 1건 / DB=로컬 MySQL / 웹훅=이번 범위 제외(나중에 확장 가능하게만 설계) / 인증키=토스 공개 테스트키(`gck/gsk` 접두사, 적용 전 최신값 재확인 필요)
+
+## 결제 흐름
+1. `/` 상품선택 → `POST /orders`: **재고 차감 없이** `Order(PENDING)` 생성만 (금액은 이 시점 계산해 저장)
+2. `GET /orders/{orderId}/checkout`: 위젯 렌더 → `requestPayment(orderId, amount, successUrl, failUrl)`
+3. 성공 → `/payments/success?paymentKey,orderId,amount` → 서버 저장 금액과 대조 → **재고 조건부 차감 성공 시에만** Toss confirm 호출 → `Order=PAID`
+4. 재고 부족 또는 Toss 거절 → confirm 자체를 안 부르거나 실패 응답 → `Order=FAILED` (재고는 트랜잭션 롤백으로 자동 복구, 별도 복구 코드 불필요)
+5. `/payments/fail`(사용자가 위젯에서 결제 자체를 실패/취소한 경우) → `Order=FAILED`
+6. 취소(결제 완료 후) → `POST /payments/{orderId}/cancel` → Toss cancel → `Order=CANCELED` + 재고 명시적 복구(이 경우만 복구 코드 필요 — 이미 커밋된 확정 재고이므로)
+7. 결제 중 이탈(콜백 자체가 안 옴) → 재고를 아직 안 건드렸으므로 **영향 없음**. 주문은 PENDING으로 남아도 무해 → 만료 스케줄러 불필요(범위에서 제외)
+
+## 정합성 핵심 결정
+- **재고 차감 시점 = 결제 승인 콜백, confirm 호출 직전**: 주문 생성 시엔 차감하지 않음 → 이탈해도 재고가 묶이지 않고, 별도 만료/정리 스케줄러가 필요 없어짐
+- **차감+confirm을 하나의 DB 트랜잭션으로 묶음**: "조건부 UPDATE로 재고 차감 → 성공 시에만 Toss confirm 호출" 순서를 지키면, 재고 부족이든 Toss 거절이든 실패 시 트랜잭션이 자동 롤백되어 차감이 **코드 없이 자동 복구**됨. 실패 상태(`Order=FAILED`, 사유) 기록만 별도 트랜잭션(`REQUIRES_NEW`)으로 커밋해 롤백에 휩쓸리지 않게 함
+- **재고 동시성 = DB 조건부 UPDATE만으로 충분**: `UPDATE product SET stock = stock - :qty WHERE stock >= :qty`. MySQL InnoDB가 해당 row에 자동으로 배타적 락을 걸어 동시 요청을 직렬화하므로 Redis 분산락 등 애플리케이션 레벨 락은 불필요(인프라 의존성만 늘어남). 대규모 트래픽으로 DB row lock 자체가 병목이 되면 그때 Redis 락으로 전환 검토
+- **금액 위변조 방지**: 콜백 쿼리의 amount를 신뢰하지 않고 서버가 주문 생성 시 저장한 금액과 대조, 불일치 시 재고 차감/confirm 모두 시도하지 않고 즉시 FAILED
+- **중복 승인 방지**: 이미 PAID면 confirm 재호출 안 함(멱등) + Toss가 `ALREADY_PROCESSED_PAYMENT`로 2차 방어 + `Payment` unique 제약이 최후 안전망
+- **웹훅 확장 대비**: 성공/실패/취소가 모두 거치는 단일 상태갱신 지점으로 모듈화 → 나중에 웹훅 컨트롤러가 이 지점만 재사용하면 됨
+
+## 구조
+```
+buyer/   Buyer, BuyerRepository
+product/ Product, ProductRepository, ProductController
+order/   Order, OrderItem, OrderStatus, OrderService, OrderController
+payment/ Payment, PaymentStatus, PaymentService, PaymentController
+         toss/ TossPaymentClient(인터페이스, 테스트 stub용) + Impl(RestClient), DTO, 예외
+```
+- 화면(Thymeleaf) 4개: 상품목록 / 체크아웃(SDK 연동) / 성공(취소버튼) / 실패
+- Toss API: `POST /v1/payments/confirm`, `POST /v1/payments/{key}/cancel`, `GET /v1/payments/{key}`(재조회)
+
+## 구현 순서
+0. DB/키 설정 → 1. 엔티티 → 2. 상품/주문생성(재고차감 없음) → 3. Toss 클라이언트 → **4. 위젯 연동 + 승인콜백(재고차감+confirm 트랜잭션)/실패콜백(핵심)** → 5. 취소(명시적 재고 복구) → 6. 테스트(H2, `@MockitoBean TossPaymentClient`로 정상/금액불일치/재고부족/중복승인/동시성 검증)
+
+## 최종 검증
+`./gradlew test` + 브라우저 수동 확인 6가지: 정상결제 / 실패결제 / 금액변조 / 재고소진 경합 / 중복클릭 / 취소
