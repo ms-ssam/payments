@@ -1,0 +1,23 @@
+spring:
+  application:
+    name: payments
+  datasource:
+    url: jdbc:mysql://localhost:3306/toss
+    username: root
+    password: Cjdfyd15!
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+
+toss:
+  payments:
+    client-key: test_gck_docs_Ovk5rk1EwkEbP0W43n07xlzm
+    secret-key: test_gsk_docs_OaPz8L5KdmQXkzRz3y47BMw6
+    base-url: https://api.tosspayments.com
+
+app:
+  base-url: http://localhost:8080  #  나중에 컨트롤러에서 successUrl/failUrl 만들 때 사용할 값
