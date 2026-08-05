@@ -38,3 +38,20 @@ payment/ Payment, PaymentStatus, PaymentService, PaymentController
 
 ## 최종 검증
 `./gradlew test` + 브라우저 수동 확인 6가지: 정상결제 / 실패결제 / 금액변조 / 재고소진 경합 / 중복클릭 / 취소
+
+## 구현 시나리오
+
+| # | 분류 | 시나리오 | 트리거 | 기대 결과 |
+|---|---|---|---|---|
+| 1 | 주문 생성 | 정상 주문 생성 | 재고 있는 상품 주문 | `Order(PENDING)` 생성, 금액 서버 계산·저장 (재고는 아직 미차감) |
+| 2 | 정상 결제 | 결제 성공 | 위젯에서 결제 완료 → successUrl 콜백 | 금액 일치 확인 → 재고 조건부 차감 성공 → confirm 성공 → `Order=PAID`, `Payment` 생성 |
+| 3 | 결제 실패 | 사용자/PG 실패 | 위젯에서 인증실패·취소 → failUrl 콜백 | `Order=FAILED` (재고는 애초에 안 건드렸으므로 영향 없음) |
+| 4 | 결제 실패 | confirm 자체 거절 | 재고는 있으나 Toss가 `REJECT_CARD_PAYMENT` 등으로 거절 | 트랜잭션 롤백으로 차감분 자동 복구 + `Order=FAILED` (별도 트랜잭션 기록) |
+| 5 | 정합성 방어 | 금액 위변조 | successUrl 콜백 쿼리의 amount ≠ 서버 저장 금액 | confirm 자체를 호출하지 않고 즉시 `Order=FAILED` |
+| 6 | 정합성 방어 | 재고 소진 경합 | 마지막 재고를 두고 동시에 여러 결제 콜백 도착 | 하나만 조건부 UPDATE 성공 → confirm 진행/PAID, 나머지는 재고부족으로 confirm 호출 없이 FAILED |
+| 7 | 정합성 방어 | 중복 승인(새로고침 등) | 이미 PAID인 주문에 success 콜백 재도달 | confirm 재호출 없이 기존 PAID 결과 그대로 반환(멱등) |
+| 8 | 정합성 방어 | Toss `ALREADY_PROCESSED_PAYMENT` | 경합으로 두 요청이 모두 confirm 호출한 극단 케이스 | 에러 수신 시 `GET /v1/payments/{key}`로 재조회 후 실제 상태로 맞춤 |
+| 9 | 결제 취소 | 결제완료 후 취소 | PAID 주문에 대해 취소 요청 | Toss cancel 성공 → `Order=CANCELED` + 재고 명시적 복구 |
+| 10 | 이탈 | 콜백 자체가 안 옴 | 결제창 진입 후 브라우저 종료 등 | 재고 미차감 상태라 영향 없음, 주문은 PENDING으로 방치돼도 무해(범위 밖) |
+
+구현 순서: 1 → 2 → 3/4 → 5~8 → 9. 각 시나리오는 그대로 테스트 케이스로 옮겨 검증한다.
