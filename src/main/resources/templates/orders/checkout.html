@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="ko" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <title>결제하기</title>
+    <script src="https://js.tosspayments.com/v2/standard"></script>
+</head>
+<body>
+<div id="checkout"
+     th:attr="data-client-key=${clientKey},data-customer-key=${customerKey},data-order-id=${orderId},data-order-name=${orderName},data-amount=${amount},data-success-url=${successUrl},data-fail-url=${failUrl}">
+
+    <h2 th:text="${orderName}">주문명</h2>
+    <p th:text="${amount} + '원'">금액</p>
+
+    <div id="payment-method"></div>
+    <div id="agreement"></div>
+
+    <button id="pay-button" type="button">결제하기</button>
+    <button id="cancel-button" type="button">취소</button>
+</div>
+
+<script src="/js/checkout.js"></script>
+</body>
+</html>

@@ -5,7 +5,6 @@ import org.springframework.http.HttpStatusCode;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 
-// TossPaymentClient 인터페이스의 실제 구현체 — 토스 결제 API(confirm/조회/cancel)를 진짜로 호출한다.
 @Component
 public class TossPaymentClientImpl implements TossPaymentClient {
 
@@ -13,8 +12,7 @@ public class TossPaymentClientImpl implements TossPaymentClient {
 
     public TossPaymentClientImpl(RestClient.Builder builder, TossPaymentsProperties properties,
                                   ObjectMapper objectMapper) {
-        // 앱이 시작될 때 딱 한 번, "토스랑 통신할 준비가 끝난 RestClient"를 조립해서 필드에 저장해둔다.
-        // 아래 confirm/getPayment/cancel은 이미 완성된 restClient를 그대로 재사용하기만 하면 된다.
+        // 요청마다 재조립하지 않도록 앱이 시작할 때 딱 한번 인증/에러변환이 끝난 RestClient를 한 번만 만들어 재사용한다
         this.restClient = builder
                 // 모든 요청의 기본 주소 (예: https://api.tosspayments.com)
                 .baseUrl(properties.baseUrl())
