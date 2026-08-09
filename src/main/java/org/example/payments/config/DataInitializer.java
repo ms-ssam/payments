@@ -1,6 +1,7 @@
 package org.example.payments.config;
 
 import java.util.UUID;
+import lombok.RequiredArgsConstructor;
 import org.example.payments.buyer.Buyer;
 import org.example.payments.buyer.BuyerRepository;
 import org.example.payments.product.Product;
@@ -10,16 +11,13 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.stereotype.Component;
 
 @Component
+@RequiredArgsConstructor
 public class DataInitializer implements ApplicationRunner {
 
     private final BuyerRepository buyerRepository;
     private final ProductRepository productRepository;
 
-    public DataInitializer(BuyerRepository buyerRepository, ProductRepository productRepository) {
-        this.buyerRepository = buyerRepository;
-        this.productRepository = productRepository;
-    }
-
+    // 앱 기동 시 게스트 Buyer와 데모 상품이 없으면 시드 데이터를 넣는다
     @Override
     public void run(ApplicationArguments args) {
         if (buyerRepository.count() == 0) {
