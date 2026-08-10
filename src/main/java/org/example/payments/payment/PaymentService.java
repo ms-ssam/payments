@@ -52,34 +52,78 @@ public class PaymentService {
         }
 
         // 조건부 차감 실패 시 예외로 트랜잭션을 롤백시켜 재고를 원복한다
-        for (OrderItem item : order.getItems()) {
-            int updated = productRepository.decreaseStock(item.getProduct().getId(), item.getQuantity());
-            if (updated == 0) {
-                orderService.markFailed(orderId, "OUT_OF_STOCK");
-                throw new InsufficientStockException(item.getProduct().getId(), item.getQuantity());
-            }
-        }
+        decreaseStockOrThrow(order);
 
-        TossPaymentResponse response;
         try {
             // 검증된 order.getTotalAmount()로만 confirm을 요청한다
-            response = tossPaymentClient.confirm(paymentKey, orderId, order.getTotalAmount());
+            TossPaymentResponse response = tossPaymentClient.confirm(paymentKey, orderId, order.getTotalAmount());
+            return markPaid(order, response);
         } catch (TossApiException e) {
             if (TOSS_ALREADY_PROCESSED.equals(e.getCode())) {
                 // 경합으로 이미 처리된 결제면 재조회해서 상태를 맞춘다
                 TossPaymentResponse actual = tossPaymentClient.getPayment(paymentKey);
                 if (actual.status() == TossPaymentStatus.DONE) {
-                    order.markPaid();
-                    paymentRepository.save(toPayment(order, actual));
-                    return order;
+                    // 이미 처리된 결제였으므로, 이번 요청이 방금 차감한 재고는 중복 차감이라 되돌린다
+                    increaseStock(order);
+                    return markPaid(order, actual);
                 }
             }
             orderService.markFailed(orderId, e.getCode());
             throw e;
         }
+    }
 
+    // 재고를 원자적으로 차감한다. 하나라도 부족하면 실패 기록 후 예외를 던져 트랜잭션을 롤백시킨다
+    private void decreaseStockOrThrow(Order order) {
+        for (OrderItem item : order.getItems()) {
+            int updated = productRepository.decreaseStock(item.getProduct().getId(), item.getQuantity());
+            if (updated == 0) {
+                orderService.markFailed(order.getOrderId(), "OUT_OF_STOCK");
+                throw new InsufficientStockException(item.getProduct().getId(), item.getQuantity());
+            }
+        }
+    }
+
+    // 주문에 담긴 상품들의 재고를 복구한다
+    private void increaseStock(Order order) {
+        for (OrderItem item : order.getItems()) {
+            productRepository.increaseStock(item.getProduct().getId(), item.getQuantity());
+        }
+    }
+
+    // 주문을 PAID로 전환하고, Payment가 아직 없을 때만 새로 저장한다(중복 승인 경합 시 이미 있을 수 있음)
+    private Order markPaid(Order order, TossPaymentResponse response) {
         order.markPaid();
-        paymentRepository.save(toPayment(order, response));
+        if (paymentRepository.findByPaymentKey(response.paymentKey()).isEmpty()) {
+            paymentRepository.save(toPayment(order, response));
+        }
+        return order;
+    }
+
+    // PAID 주문만 취소 가능하며, 토스 환불이 실제로 성공한 경우에만 주문/재고를 갱신한다
+    @Transactional
+    public Order cancelPayment(String orderId, String cancelReason) {
+        if (cancelReason == null || cancelReason.isBlank()) {
+            throw new IllegalArgumentException("취소 사유는 필수입니다.");
+        }
+
+        Order order = orderRepository.findByOrderId(orderId)
+                .orElseThrow(() -> new OrderNotFoundException(orderId));
+
+        if (order.getStatus() != OrderStatus.PAID) {
+            throw new InvalidOrderStateException(orderId, order.getStatus());
+        }
+
+        Payment payment = paymentRepository.findByOrder(order)
+                .orElseThrow(() -> new IllegalStateException("PAID 주문에 결제 내역이 없습니다. orderId=" + orderId));
+
+        // 토스 환불이 성공했을 때만 아래 로컬 상태를 바꾼다 — 실패하면 예외가 던져지고 아무것도 변경되지 않는다
+        tossPaymentClient.cancel(payment.getPaymentKey(), cancelReason);
+
+        order.markCanceled(cancelReason);
+        payment.markCanceled();
+        increaseStock(order);
+
         return order;
     }
 

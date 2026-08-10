@@ -56,6 +56,10 @@ public class OrderService {
     public CheckoutInfo getCheckoutInfo(String orderId) {
         Order order = orderRepository.findByOrderId(orderId)
                 .orElseThrow(() -> new OrderNotFoundException(orderId));
+        // 이미 종결된 주문이면 결제창을 띄우기 전에 여기서 막는다
+        if (order.getStatus() != OrderStatus.PENDING) {
+            throw new InvalidOrderStateException(orderId, order.getStatus());
+        }
         return new CheckoutInfo(order.getBuyer().getCustomerKey(), order.getOrderId(), order.getOrderName(),
                 order.getTotalAmount());
     }
