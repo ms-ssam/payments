@@ -6,6 +6,7 @@ import org.example.payments.payment.PaymentAmountMismatchException;
 import org.example.payments.payment.toss.TossApiException;
 import org.example.payments.product.InsufficientStockException;
 import org.example.payments.product.ProductNotFoundException;
+import org.example.payments.settlement.SettlementNotFoundException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -15,8 +16,8 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
-    // 상품/주문을 찾을 수 없는 경우 404로 응답한다
-    @ExceptionHandler({ProductNotFoundException.class, OrderNotFoundException.class})
+    // 상품/주문/정산 결과를 찾을 수 없는 경우 404로 응답한다
+    @ExceptionHandler({ProductNotFoundException.class, OrderNotFoundException.class, SettlementNotFoundException.class})
     public ResponseEntity<ErrorResponse> handleNotFound(RuntimeException e) {
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(new ErrorResponse(e.getMessage()));
     }

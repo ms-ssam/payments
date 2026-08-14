@@ -39,4 +39,10 @@ public class PaymentController {
     public PaymentResultResponse cancel(@PathVariable String orderId, @RequestBody CancelPaymentRequest request) {
         return PaymentResultResponse.from(paymentService.cancelPayment(orderId, request.cancelReason()));
     }
+
+    // 구매확정 — 선수금을 매출로 전환한다. 이후엔 취소 불가
+    @PostMapping("/{orderId}/confirm")
+    public PaymentResultResponse confirm(@PathVariable String orderId) {
+        return PaymentResultResponse.from(paymentService.confirmPurchase(orderId));
+    }
 }

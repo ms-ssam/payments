@@ -54,6 +54,8 @@ public class Order {
 
     private LocalDateTime paidAt;
 
+    private LocalDateTime confirmedAt;
+
     // 낙관적 락: 동일 주문에 대한 동시 상태 갱신(중복 confirm 등) 충돌 감지용, Hibernate가 자동 관리
     @Version
     private Long version;
@@ -78,6 +80,11 @@ public class Order {
     public void markPaid() {
         this.status = OrderStatus.PAID;
         this.paidAt = LocalDateTime.now();
+    }
+
+    public void markConfirmed() {
+        this.status = OrderStatus.CONFIRMED;
+        this.confirmedAt = LocalDateTime.now();
     }
 
     public void markFailed(String reason) {

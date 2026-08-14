@@ -21,3 +21,7 @@ toss:
 
 app:
   base-url: http://localhost:8080  #  나중에 컨트롤러에서 successUrl/failUrl 만들 때 사용할 값
+
+payments:
+  settlement:
+    fee-rate: 0.029   # 학습용 고정값. 실제 Toss 수수료와 무관함(실무에선 PG가 계산해 알려주는 값)

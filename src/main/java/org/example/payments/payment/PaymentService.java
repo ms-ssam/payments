@@ -1,6 +1,7 @@
 package org.example.payments.payment;
 
 import lombok.RequiredArgsConstructor;
+import org.example.payments.ledger.LedgerService;
 import org.example.payments.order.InvalidOrderStateException;
 import org.example.payments.order.Order;
 import org.example.payments.order.OrderItem;
@@ -14,6 +15,7 @@ import org.example.payments.payment.toss.TossPaymentResponse;
 import org.example.payments.payment.toss.TossPaymentStatus;
 import org.example.payments.product.InsufficientStockException;
 import org.example.payments.product.ProductRepository;
+import org.example.payments.settlement.SettlementService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -28,6 +30,8 @@ public class PaymentService {
     private final PaymentRepository paymentRepository;
     private final OrderService orderService;
     private final TossPaymentClient tossPaymentClient;
+    private final LedgerService ledgerService;
+    private final SettlementService settlementService;
 
     // 금액 검증과 재고 차감에 성공한 경우에만 토스 결제 승인을 요청하고 주문을 PAID로 전환한다
     @Transactional
@@ -95,8 +99,29 @@ public class PaymentService {
     private Order markPaid(Order order, TossPaymentResponse response) {
         order.markPaid();
         if (paymentRepository.findByPaymentKey(response.paymentKey()).isEmpty()) {
-            paymentRepository.save(toPayment(order, response));
+            Payment payment = paymentRepository.save(toPayment(order, response));
+            // 아직 매출로 인식하지 않는다 — 선수금으로 잡고, 구매확정 시점에 매출로 전환한다
+            ledgerService.postPaymentApproved(payment.getId(), payment.getTotalAmount());
         }
+        return order;
+    }
+
+    // 구매확정: 선수금으로 잡혀있던 매출을 정식 매출로 인식한다. PAID 상태에서만 가능하며 이후엔 취소 불가
+    @Transactional
+    public Order confirmPurchase(String orderId) {
+        Order order = orderRepository.findByOrderId(orderId)
+                .orElseThrow(() -> new OrderNotFoundException(orderId));
+
+        if (order.getStatus() != OrderStatus.PAID) {
+            throw new InvalidOrderStateException(orderId, order.getStatus());
+        }
+
+        Payment payment = paymentRepository.findByOrder(order)
+                .orElseThrow(() -> new IllegalStateException("PAID 주문에 결제 내역이 없습니다. orderId=" + orderId));
+
+        order.markConfirmed();
+        ledgerService.postPurchaseConfirmed(payment.getId(), payment.getTotalAmount());
+
         return order;
     }
 
@@ -123,6 +148,14 @@ public class PaymentService {
         order.markCanceled(cancelReason);
         payment.markCanceled();
         increaseStock(order);
+
+        // 이미 정산된(PG가 지급 끝낸) 결제면 즉시 회수 불가 — 다음 정산에서 차감할 환수 대기로 남긴다
+        if (settlementService.isSettled(payment)) {
+            settlementService.recordClawback(payment, payment.getTotalAmount());
+            ledgerService.postPaymentCanceledAfterSettlement(payment.getId(), payment.getTotalAmount());
+        } else {
+            ledgerService.postPaymentCanceledBeforeSettlement(payment.getId(), payment.getTotalAmount());
+        }
 
         return order;
     }
