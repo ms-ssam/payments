@@ -34,7 +34,9 @@
 - **자동화 테스트는 이번 범위 제외** — 수동(curl) 검증으로만 확인. H2/JUnit 테스트 도입은 나중에 별도로 고려.
 
 ## 계정과목 & 분개 설계
-계정: `RECEIVABLE_SETTLEMENT`(미수금-정산예정, 자산), `RECEIVABLE_CLAWBACK`(환수미수금, 자산), `UNEARNED_REVENUE`(선수금/계약부채, **부채**), `REVENUE`(매출, 수익), `FEE_EXPENSE`(지급수수료, 비용), `CASH_BANK`(보통예금, 자산)
+계정: `RECEIVABLE_SETTLEMENT`(미수금-정산예정, 자산), `RECEIVABLE_CLAWBACK`(환수미수금, **부채** — 정산 후 취소로 PG에게 되돌려줘야 할 돈이라 "받을 돈"이 아니라 "갚을 돈"), `UNEARNED_REVENUE`(선수금/계약부채, 부채), `REVENUE`(매출, 수익), `FEE_EXPENSE`(지급수수료, 비용), `CASH_BANK`(보통예금, 자산)
+
+각 계정은 `LedgerAccount` enum에 "정상잔액 방향"(자산·비용=차변, 부채·수익=대변)을 갖고 있고, `LedgerService.getBalance()`가 이를 참조해 부호를 맞춰 계산한다(전부 "차변-대변"으로 계산하면 부채/수익 계정 잔액 부호가 뒤집히는 버그가 실제로 있었음 — 아래 "구현 중 발견한 이슈" 참고).
 
 | 이벤트 | 차변 | 대변 |
 |---|---|---|
@@ -72,7 +74,8 @@ settlement/  Settlement, SettlementItem, RefundClawback, ClawbackStatus(enum: PE
 
 ### SettlementService
 - `isSettled(Payment)`: `settlementItemRepository.existsByPayment(payment)`
-- `recordClawback(Payment, amount)`: `RefundClawback(PENDING)` 생성 — PaymentService가 정산후취소 시 호출
+- `recordClawback(Payment, amount)`: 호출 전 `isSettled(payment)`를 스스로 다시 검증(호출자를 믿지 않음) 후 `RefundClawback(PENDING)` 생성 — PaymentService가 정산후취소 시 호출
+- `getSettlements(LocalDate)`: 해당 날짜에 실행된 정산 배치를 **전부** 반환(리스트) — 수동 트리거라 같은 날짜에 여러 번 실행될 수 있어 "날짜당 1건"을 보장하지 않음. 없으면 `SettlementNotFoundException`
 - `runSettlement(LocalDate targetDate)` (`@Transactional`):
   1. `paymentRepository.findByStatusAndApprovedAtBetween(DONE, start, end)` 중 `isSettled==false`인 것만 대상
   2. 건별 fee = `amount * feeRate` 원단위 절사(내림), gross/fee 합산
@@ -94,7 +97,7 @@ settlement/  Settlement, SettlementItem, RefundClawback, ClawbackStatus(enum: PE
 ## REST 엔드포인트 (신규)
 - `POST /payments/{orderId}/confirm` → 구매확정(매출 인식). `PAID`가 아니면 `InvalidOrderStateException`
 - `POST /settlements?date=yyyy-MM-dd` → `runSettlement` 실행, 결과 JSON(gross/fee/clawback/net/itemCount) 반환. 재실행해도 이미 정산된 건은 대상에서 빠지므로 멱등.
-- `GET /settlements/{date}` → 해당 날짜 정산 결과 조회(없으면 404 `SettlementNotFoundException`)
+- `GET /settlements/{date}` → 해당 날짜에 실행된 정산 배치를 **리스트**로 조회(같은 날짜에 여러 번 실행됐다면 배치별로 각각 반환, 없으면 404 `SettlementNotFoundException`)
 - `GET /receivables` → `{unsettledAmount, pendingClawbackAmount, unearnedRevenueAmount}` — 각각 `RECEIVABLE_SETTLEMENT`, `RECEIVABLE_CLAWBACK`, `UNEARNED_REVENUE` 잔액
 
 ## 설정값
@@ -118,7 +121,7 @@ payments:
 7. `cancelPayment` 정산 전/후 분기: `UNEARNED_REVENUE` 역분개 + 정산 후엔 `RefundClawback` 생성
 8. `runSettlement`에 clawback 상계 로직 추가(부분 이월 포함)
 9. `GET /receivables` 추가
-10. 문서화: 기존 `docs/payment-flow-sequence.md` 스타일에 맞춰 정산/원장 흐름 다이어그램 + 시나리오 표 문서 추가
+10. 문서화: 기존 `docs/payment-flow-sequence.md` 스타일에 맞춰 정산/원장 흐름 다이어그램 + 시나리오 표 문서 추가 → `docs/settlement-ledger-flow-sequence.md`
 
 ## 구현 시나리오
 
@@ -139,3 +142,13 @@ payments:
 
 ## 검증
 수동(curl) 시나리오: 결제 승인 2건(선수금 인식 확인) → 1건 구매확정(매출 전환 확인) → 정산 실행(gross/fee/net 확인, 확정 여부와 무관하게 둘 다 정산 대상) → `GET /receivables`로 미수금 0 확인 → 확정 전 상태인 나머지 1건(이미 정산됨) 취소 → `pendingClawbackAmount` 증가 확인 → 신규 결제 1건 승인 후 재정산 → clawback이 차감된 net으로 지급되고 `pendingClawbackAmount` 0으로 복귀하는지 확인
+
+실제 curl/DB 검증 절차와 결과는 `docs/settlement-ledger-flow-sequence.md`에 정리했다.
+
+## 구현 중 발견한 이슈
+계획 단계에서는 안 보였다가 실제로 curl/DB로 검증하면서 드러난 문제 4가지. 전부 이번 커밋에서 수정됨.
+
+1. **`LedgerService.getBalance()` 부호 버그**: 모든 계정을 "차변-대변"으로 고정 계산해서, 부채(`UNEARNED_REVENUE`)처럼 대변이 정상잔액인 계정은 잔액이 음수로 뒤집혀 나왔다. → `LedgerAccount`에 계정별 정상잔액 방향(`normalBalanceSide`)을 추가하고 `getBalance()`가 이를 참조하도록 수정.
+2. **`RECEIVABLE_CLAWBACK` 계정 오분류**: 처음엔 "환수미수금"이라는 이름 때문에 자산으로 분류했는데, 실제로는 "PG에게 되돌려줘야 할 돈"이라 부채다. 1번과 같은 부호 버그로 이어짐 → 정상잔액을 `CREDIT`(부채)로 수정.
+3. **MySQL 네이티브 ENUM 컬럼 잘림**: `OrderStatus`에 `CONFIRMED`를 추가했는데, 기존 `orders.status` 컬럼이 Hibernate에 의해 `ENUM('PENDING','PAID','FAILED','CANCELED')`로 이미 생성돼 있었고, `ddl-auto=update`는 기존 네이티브 ENUM 컬럼의 값 목록을 자동으로 안 넓혀준다. `CONFIRMED` 저장 시 "Data truncated" 오류 발생 → `ALTER TABLE orders MODIFY COLUMN status ENUM(...)`로 수동 반영. (신규 테이블의 ENUM 컬럼은 생성 시점에 전체 값을 포함해서 문제없음 — 기존 테이블에 새 enum 값을 추가할 때만 해당)
+4. **정산 배치의 "날짜당 1건" 가정 오류**: `Settlement`가 암묵적으로 날짜당 1건이라고 가정했는데(`findBySettlementDate` → `Optional`), 정산이 수동 트리거라 같은 날짜에 여러 번 실행될 수 있다는 걸 실제 재현하고서야 발견. 두 번째 실행 시 `NonUniqueResultException` 발생 → `Settlement` 조회를 리스트 기반으로 변경, `GET /settlements/{date}`도 배치별로 각각 반환하도록 수정(합산하지 않음 — 각 배치가 독립된 기록이라 억지로 합칠 이유가 없음).
