@@ -42,8 +42,22 @@ Java 21 · Spring Boot 4.1 · Spring Data JPA · MySQL · Thymeleaf · RestClien
 
 ## 실행
 
-1. 로컬 MySQL에 `toss` 데이터베이스를 만들고, `src/main/resources/application.yml`의 접속 정보를 맞춥니다.
-2. `./gradlew bootRun`
+1. 로컬 MySQL에 `toss` 데이터베이스를 만듭니다.
+2. 환경변수를 설정하고 실행합니다. (IntelliJ라면 실행 설정의 Environment variables에 입력)
+
+   | 환경변수 | 필수 | 설명 |
+   |---|---|---|
+   | `DB_PASSWORD` | O | MySQL 비밀번호 |
+   | `DB_URL` | | 기본값 `jdbc:mysql://localhost:3306/toss` |
+   | `DB_USERNAME` | | 기본값 `root` |
+   | `TOSS_CLIENT_KEY` | O | 토스페이먼츠 클라이언트 키 (`test_gck_…`) |
+   | `TOSS_SECRET_KEY` | O | 토스페이먼츠 시크릿 키 (`test_gsk_…`) |
+
+   토스 키는 [토스페이먼츠 개발자 문서](https://docs.tosspayments.com)에 공개된 테스트 키를 써도 됩니다.
+
+   ```bash
+   DB_PASSWORD=... TOSS_CLIENT_KEY=... TOSS_SECRET_KEY=... ./gradlew bootRun
+   ```
 3. 기동하면 게스트 구매자 1명과 데모 상품 3개가 자동으로 들어갑니다.
 4. `POST /orders`로 주문을 만들고, 브라우저에서 `http://localhost:8080/orders/{orderId}/checkout`을 열어 테스트 결제를 진행합니다.
 

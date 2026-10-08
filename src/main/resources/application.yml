@@ -2,9 +2,9 @@ spring:
   application:
     name: payments
   datasource:
-    url: jdbc:mysql://localhost:3306/toss
-    username: root
-    password: Cjdfyd15!
+    url: ${DB_URL:jdbc:mysql://localhost:3306/toss}
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD}
   jpa:
     hibernate:
       ddl-auto: update
@@ -15,8 +15,8 @@ spring:
 
 toss:
   payments:
-    client-key: test_gck_docs_Ovk5rk1EwkEbP0W43n07xlzm
-    secret-key: test_gsk_docs_OaPz8L5KdmQXkzRz3y47BMw6
+    client-key: ${TOSS_CLIENT_KEY}
+    secret-key: ${TOSS_SECRET_KEY}
     base-url: https://api.tosspayments.com
 
 app:
