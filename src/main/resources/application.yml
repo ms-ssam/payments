@@ -18,6 +18,10 @@ toss:
     client-key: ${TOSS_CLIENT_KEY}
     secret-key: ${TOSS_SECRET_KEY}
     base-url: https://api.tosspayments.com
+    # 토스 공식 권장값은 확인되지 않아 임의로 정한 값. 운영 로그를 보며 조정한다
+    connect-timeout: 1500ms     # 초과 시 요청이 토스에 도달하지 않은 것 → 확정 실패
+    payment-read-timeout: 10s   # 승인·취소. 초과 시 토스 처리 여부를 알 수 없음 → 결과 불명
+    inquiry-read-timeout: 3s    # 결제 조회
 
 app:
   base-url: http://localhost:8080  #  나중에 컨트롤러에서 successUrl/failUrl 만들 때 사용할 값
