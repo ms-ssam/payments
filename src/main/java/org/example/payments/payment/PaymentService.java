@@ -112,14 +112,12 @@ public class PaymentService {
         Order order = orderRepository.findByOrderId(orderId)
                 .orElseThrow(() -> new OrderNotFoundException(orderId));
 
-        if (order.getStatus() != OrderStatus.PAID) {
-            throw new InvalidOrderStateException(orderId, order.getStatus());
-        }
+        // PAID가 아니면 여기서 InvalidOrderStateException — 결제 내역 조회보다 먼저 해야 미결제 주문이 409로 응답된다
+        order.markConfirmed();
 
         Payment payment = paymentRepository.findByOrder(order)
                 .orElseThrow(() -> new IllegalStateException("PAID 주문에 결제 내역이 없습니다. orderId=" + orderId));
 
-        order.markConfirmed();
         ledgerService.postPurchaseConfirmed(payment.getId(), payment.getTotalAmount());
 
         return order;
@@ -135,17 +133,15 @@ public class PaymentService {
         Order order = orderRepository.findByOrderId(orderId)
                 .orElseThrow(() -> new OrderNotFoundException(orderId));
 
-        if (order.getStatus() != OrderStatus.PAID) {
-            throw new InvalidOrderStateException(orderId, order.getStatus());
-        }
+        // PAID가 아니면 여기서 InvalidOrderStateException — 토스 환불 호출 전에 상태 전이 가능 여부를 먼저 검사한다.
+        // 토스 환불이 실패하면 예외로 트랜잭션이 롤백돼 이 상태 변경도 함께 취소된다
+        order.markCanceled(cancelReason);
 
         Payment payment = paymentRepository.findByOrder(order)
                 .orElseThrow(() -> new IllegalStateException("PAID 주문에 결제 내역이 없습니다. orderId=" + orderId));
 
-        // 토스 환불이 성공했을 때만 아래 로컬 상태를 바꾼다 — 실패하면 예외가 던져지고 아무것도 변경되지 않는다
         tossPaymentClient.cancel(payment.getPaymentKey(), cancelReason);
 
-        order.markCanceled(cancelReason);
         payment.markCanceled();
         increaseStock(order);
 

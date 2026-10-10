@@ -78,22 +78,30 @@ public class Order {
     }
 
     public void markPaid() {
-        this.status = OrderStatus.PAID;
+        transitionTo(OrderStatus.PAID);
         this.paidAt = LocalDateTime.now();
     }
 
     public void markConfirmed() {
-        this.status = OrderStatus.CONFIRMED;
+        transitionTo(OrderStatus.CONFIRMED);
         this.confirmedAt = LocalDateTime.now();
     }
 
     public void markFailed(String reason) {
-        this.status = OrderStatus.FAILED;
+        transitionTo(OrderStatus.FAILED);
         this.failReason = reason;
     }
 
     public void markCanceled(String reason) {
-        this.status = OrderStatus.CANCELED;
+        transitionTo(OrderStatus.CANCELED);
         this.failReason = reason;
+    }
+
+    // 상태는 이 메서드로만 바꾼다 — 허용되지 않은 전이(OrderStatus.canTransitionTo)면 예외를 던진다
+    private void transitionTo(OrderStatus next) {
+        if (!status.canTransitionTo(next)) {
+            throw new InvalidOrderStateException(orderId, status);
+        }
+        this.status = next;
     }
 }
