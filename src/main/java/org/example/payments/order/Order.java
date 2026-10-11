@@ -82,8 +82,8 @@ public class Order {
         return status == OrderStatus.APPROVAL_REQUESTED || status == OrderStatus.PAID;
     }
 
-    // 토스 승인 결과를 기다리는 중인지 — 이미 다른 경로에서 결과가 반영됐다면 false
-    public boolean isAwaitingApprovalResult() {
+    // 승인 진행 중인지(APPROVAL_REQUESTED) — 이미 다른 경로에서 결과가 반영됐다면 false
+    public boolean isApprovalInProgress() {
         return status == OrderStatus.APPROVAL_REQUESTED;
     }
 
@@ -106,9 +106,30 @@ public class Order {
         this.failReason = reason;
     }
 
-    public void markCanceled(String reason) {
-        transitionTo(OrderStatus.CANCELED);
+    // 취소를 이미 시작했거나 끝냈는지 — 중복 취소 요청을 걸러낼 때 쓴다
+    public boolean isCancelStartedOrDone() {
+        return status == OrderStatus.CANCEL_REQUESTED || status == OrderStatus.CANCELED;
+    }
+
+    // 취소 진행 중인지(CANCEL_REQUESTED) — 이미 다른 경로에서 결과가 반영됐다면 false
+    public boolean isCancelInProgress() {
+        return status == OrderStatus.CANCEL_REQUESTED;
+    }
+
+    // 취소 사유는 요청 시점에 저장한다 — 결과 불명으로 남아도 나중에 취소를 마무리할 때 사유가 남아 있게 하기 위함
+    public void markCancelRequested(String reason) {
+        transitionTo(OrderStatus.CANCEL_REQUESTED);
         this.failReason = reason;
+    }
+
+    public void markCanceled() {
+        transitionTo(OrderStatus.CANCELED);
+    }
+
+    // 토스가 환불을 확실히 거절해 결제 완료 상태로 되돌린다. 결제 시각(paidAt)은 그대로 둔다
+    public void markCancelRejected() {
+        transitionTo(OrderStatus.PAID);
+        this.failReason = null;
     }
 
     // 상태는 이 메서드로만 바꾼다 — 허용되지 않은 전이(OrderStatus.canTransitionTo)면 예외를 던진다

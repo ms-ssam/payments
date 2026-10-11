@@ -73,10 +73,13 @@ public class TossPaymentClientImpl implements TossPaymentClient {
                 .body(TossPaymentResponse.class);
     }
 
+    // 실패하면 1초 뒤 같은 멱등키로 1회 재요청한다. 재요청 대상은 TossRetryPredicate 참고
+    @Retryable(predicate = TossRetryPredicate.class, maxRetries = 1, delay = 1000)
     @Override
-    public TossPaymentResponse cancel(String paymentKey, String cancelReason) {
+    public TossPaymentResponse cancel(String paymentKey, String cancelReason, String idempotencyKey) {
         return paymentClient.post()
                 .uri("/v1/payments/{paymentKey}/cancel", paymentKey)
+                .header("Idempotency-Key", idempotencyKey)
                 .body(new TossCancelRequest(cancelReason))
                 .retrieve()
                 .body(TossPaymentResponse.class);

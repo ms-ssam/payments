@@ -1,5 +1,6 @@
 package org.example.payments.payment.toss;
 
+import static org.example.payments.payment.toss.TossErrorCode.ALREADY_CANCELED_PAYMENT;
 import static org.example.payments.payment.toss.TossErrorCode.ALREADY_PROCESSED_PAYMENT;
 import static org.example.payments.payment.toss.TossErrorCode.IDEMPOTENT_REQUEST_PROCESSING;
 
@@ -29,7 +30,13 @@ public class TossApiException extends RuntimeException {
     public boolean isDefiniteRejection() {
         return status.is4xxClientError()
                 && !hasCode(ALREADY_PROCESSED_PAYMENT)
+                && !hasCode(ALREADY_CANCELED_PAYMENT)
                 && !hasCode(IDEMPOTENT_REQUEST_PROCESSING);
+    }
+
+    // 토스에서는 이미 환불이 끝난 결제인지 — 토스 관리자 화면에서 직접 환불한 뒤 우리 쪽에서 취소를 요청한 경우 등
+    public boolean isAlreadyCanceled() {
+        return hasCode(ALREADY_CANCELED_PAYMENT);
     }
 
     // 다시 보내면 결과가 달라질 수 있는지 — 토스 일시 오류(5xx)이거나 같은 멱등키의 이전 요청이 아직 처리 중

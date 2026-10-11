@@ -65,7 +65,7 @@ public class PaymentApprovalProcessor {
         Order order = findOrder(orderId);
 
         // 이미 다른 경로(대사 배치 등)에서 결과가 반영됐으면 건드리지 않는다
-        if (!order.isAwaitingApprovalResult()) {
+        if (!order.isApprovalInProgress()) {
             return order;
         }
 
@@ -83,7 +83,7 @@ public class PaymentApprovalProcessor {
     public Order failApproval(String orderId, String reason) {
         Order order = findOrder(orderId);
 
-        if (!order.isAwaitingApprovalResult()) {
+        if (!order.isApprovalInProgress()) {
             return order;
         }
 
