@@ -1,91 +1,75 @@
 package org.example.payments.payment;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.example.payments.ledger.LedgerService;
-import org.example.payments.order.InvalidOrderStateException;
 import org.example.payments.order.Order;
 import org.example.payments.order.OrderItem;
 import org.example.payments.order.OrderNotFoundException;
 import org.example.payments.order.OrderRepository;
 import org.example.payments.order.OrderService;
-import org.example.payments.order.OrderStatus;
+import org.example.payments.payment.PaymentApprovalProcessor.ApprovalTarget;
 import org.example.payments.payment.toss.TossApiException;
 import org.example.payments.payment.toss.TossPaymentClient;
 import org.example.payments.payment.toss.TossPaymentResponse;
-import org.example.payments.payment.toss.TossPaymentStatus;
 import org.example.payments.product.InsufficientStockException;
 import org.example.payments.product.ProductRepository;
 import org.example.payments.settlement.SettlementService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.client.ResourceAccessException;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class PaymentService {
-
-    private static final String TOSS_ALREADY_PROCESSED = "ALREADY_PROCESSED_PAYMENT";
 
     private final OrderRepository orderRepository;
     private final ProductRepository productRepository;
     private final PaymentRepository paymentRepository;
     private final OrderService orderService;
+    private final PaymentApprovalProcessor approvalProcessor;
     private final TossPaymentClient tossPaymentClient;
     private final LedgerService ledgerService;
     private final SettlementService settlementService;
 
-    // 금액 검증과 재고 차감에 성공한 경우에만 토스 결제 승인을 요청하고 주문을 PAID로 전환한다
-    @Transactional
+    // 결제 승인. 트랜잭션1(검증·재고 차감) → 토스 승인 호출(트랜잭션 밖) → 트랜잭션2(결과 반영) 순서로 진행한다.
+    // 토스를 기다리는 동안 DB 락·커넥션을 잡지 않기 위해 이 메서드 자체에는 @Transactional을 두지 않는다
     public Order confirmPayment(String orderId, String paymentKey, long clientAmount) {
-        Order order = orderRepository.findByOrderId(orderId)
-                .orElseThrow(() -> new OrderNotFoundException(orderId));
-
-        // 이미 PAID면 재처리하지 않고 그대로 반환(멱등)
-        if (order.getStatus() == OrderStatus.PAID) {
-            return order;
-        }
-
-        // PENDING이 아니면(FAILED/CANCELED로 이미 종결됨) 다시 PAID로 되돌리지 않는다
-        if (order.getStatus() != OrderStatus.PENDING) {
-            throw new InvalidOrderStateException(orderId, order.getStatus());
-        }
-
-        // clientAmount는 브라우저 쿼리파라미터 값이라 신뢰하지 않는다
-        if (!order.getTotalAmount().equals(clientAmount)) {
-            orderService.markFailed(orderId, "AMOUNT_MISMATCH");
-            throw new PaymentAmountMismatchException(orderId, order.getTotalAmount(), clientAmount);
-        }
-
-        // 조건부 차감 실패 시 예외로 트랜잭션을 롤백시켜 재고를 원복한다
-        decreaseStockOrThrow(order);
-
+        ApprovalTarget approvalTarget;
         try {
-            // 검증된 order.getTotalAmount()로만 confirm을 요청한다
-            TossPaymentResponse response = tossPaymentClient.confirm(paymentKey, orderId, order.getTotalAmount());
-            return markPaid(order, response);
-        } catch (TossApiException e) {
-            if (TOSS_ALREADY_PROCESSED.equals(e.getCode())) {
-                // 경합으로 이미 처리된 결제면 재조회해서 상태를 맞춘다
-                TossPaymentResponse actual = tossPaymentClient.getPayment(paymentKey);
-                if (actual.status() == TossPaymentStatus.DONE) {
-                    // 이미 처리된 결제였으므로, 이번 요청이 방금 차감한 재고는 중복 차감이라 되돌린다
-                    increaseStock(order);
-                    return markPaid(order, actual);
-                }
-            }
-            orderService.markFailed(orderId, e.getCode());
+            approvalTarget = approvalProcessor.startApproval(orderId, clientAmount);
+        } catch (PaymentAmountMismatchException e) {
+            // 트랜잭션1이 롤백돼 주문은 PENDING 그대로다. 실패 기록은 롤백 후 따로 남긴다
+            orderService.markFailed(orderId, "AMOUNT_MISMATCH");
+            throw e;
+        } catch (InsufficientStockException e) {
+            orderService.markFailed(orderId, "OUT_OF_STOCK");
             throw e;
         }
-    }
 
-    // 재고를 원자적으로 차감한다. 하나라도 부족하면 실패 기록 후 예외를 던져 트랜잭션을 롤백시킨다
-    private void decreaseStockOrThrow(Order order) {
-        for (OrderItem item : order.getItems()) {
-            int updated = productRepository.decreaseStock(item.getProduct().getId(), item.getQuantity());
-            if (updated == 0) {
-                orderService.markFailed(order.getOrderId(), "OUT_OF_STOCK");
-                throw new InsufficientStockException(item.getProduct().getId(), item.getQuantity());
-            }
+        if (!approvalTarget.tossCallNeeded()) {
+            return approvalTarget.order();
         }
+
+        // 재요청은 TossPaymentClient.confirm의 @Retryable이 처리한다. 여기서 받는 예외는 재요청까지 실패한 결과다
+        TossPaymentResponse response;
+        try {
+            response = tossPaymentClient.confirm(paymentKey, orderId, approvalTarget.order().getTotalAmount());
+        } catch (TossApiException e) {              // 토스가 에러로 응답함
+            if (e.isDefiniteRejection()) {
+                approvalProcessor.failApproval(orderId, e.getCode());
+                throw e;
+            }
+            // 결과 불명: 토스가 승인했을 수도 있으므로 실패로 단정하지 않고 APPROVAL_REQUESTED로 남긴다(대사 배치가 정리)
+            log.warn("토스 승인 결과 불명 — APPROVAL_REQUESTED로 남김. orderId={}", orderId, e);
+            return approvalTarget.order();
+        } catch (ResourceAccessException e) {       // 토스 응답을 못 받음(타임아웃·연결 실패)
+            log.warn("토스 승인 결과 불명 — APPROVAL_REQUESTED로 남김. orderId={}", orderId, e);
+            return approvalTarget.order();
+        }
+
+        return approvalProcessor.completeApproval(orderId, response);
     }
 
     // 주문에 담긴 상품들의 재고를 복구한다
@@ -93,17 +77,6 @@ public class PaymentService {
         for (OrderItem item : order.getItems()) {
             productRepository.increaseStock(item.getProduct().getId(), item.getQuantity());
         }
-    }
-
-    // 주문을 PAID로 전환하고, Payment가 아직 없을 때만 새로 저장한다(중복 승인 경합 시 이미 있을 수 있음)
-    private Order markPaid(Order order, TossPaymentResponse response) {
-        order.markPaid();
-        if (paymentRepository.findByPaymentKey(response.paymentKey()).isEmpty()) {
-            Payment payment = paymentRepository.save(toPayment(order, response));
-            // 아직 매출로 인식하지 않는다 — 선수금으로 잡고, 구매확정 시점에 매출로 전환한다
-            ledgerService.postPaymentApproved(payment.getId(), payment.getTotalAmount());
-        }
-        return order;
     }
 
     // 구매확정: 선수금으로 잡혀있던 매출을 정식 매출로 인식한다. PAID 상태에서만 가능하며 이후엔 취소 불가
@@ -154,10 +127,5 @@ public class PaymentService {
         }
 
         return order;
-    }
-
-    // 토스 응답을 Payment 엔티티로 변환한다
-    private Payment toPayment(Order order, TossPaymentResponse response) {
-        return new Payment(order, response.paymentKey(), response.method(), PaymentStatus.DONE, response.totalAmount());
     }
 }

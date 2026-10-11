@@ -5,6 +5,7 @@ import java.time.Duration;
 import tools.jackson.databind.ObjectMapper;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
+import org.springframework.resilience.annotation.Retryable;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 
@@ -49,10 +50,16 @@ public class TossPaymentClientImpl implements TossPaymentClient {
         return factory;
     }
 
+    // 실패하면 1초 뒤 같은 멱등키로 1회 재요청한다. 재요청 대상은 TossRetryPredicate 참고
+    @Retryable(predicate = TossRetryPredicate.class, maxRetries = 1, delay = 1000)
     @Override
     public TossPaymentResponse confirm(String paymentKey, String orderId, long amount) {
         return paymentClient.post()
                 .uri("/v1/payments/confirm")
+                // 같은 멱등키로 다시 요청하면 토스는 다시 처리하지 않고 첫 응답을 그대로 돌려준다(15일간 유효).
+                // orderId는 서버가 만든 UUID이고, 실패한 주문은 다시 결제할 수 없어 주문당 승인 요청이 한 번뿐이라 그대로 쓴다.
+                // 한 주문에서 결제를 여러 번 시도할 수 있게 바뀌면 시도마다 별도 키를 만들어 저장해야 한다
+                .header("Idempotency-Key", orderId)
                 .body(new TossConfirmRequest(paymentKey, orderId, amount))
                 .retrieve()
                 .body(TossPaymentResponse.class);

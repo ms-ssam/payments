@@ -9,7 +9,6 @@ import org.example.payments.product.Product;
 import org.example.payments.product.ProductNotFoundException;
 import org.example.payments.product.ProductRepository;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
@@ -64,8 +63,8 @@ public class OrderService {
                 order.getTotalAmount());
     }
 
-    // 주문을 실패 처리한다. 호출자의 트랜잭션이 나중에 롤백돼도 이 기록은 남도록 별도 트랜잭션(REQUIRES_NEW)으로 즉시 커밋한다
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    // PENDING 주문을 FAILED로 바꾼다 (금액 불일치, 재고 부족, 결제창 실패처럼 재고를 차감하기 전의 실패용)
+    @Transactional
     public void markFailed(String orderId, String reason) {
         Order order = orderRepository.findByOrderId(orderId)
                 .orElseThrow(() -> new OrderNotFoundException(orderId));

@@ -77,6 +77,20 @@ public class Order {
         item.assignOrder(this);
     }
 
+    // 승인을 이미 시작했거나 끝냈는지 — 중복 승인 요청(새로고침 등)을 걸러낼 때 쓴다
+    public boolean isApprovalStartedOrDone() {
+        return status == OrderStatus.APPROVAL_REQUESTED || status == OrderStatus.PAID;
+    }
+
+    // 토스 승인 결과를 기다리는 중인지 — 이미 다른 경로에서 결과가 반영됐다면 false
+    public boolean isAwaitingApprovalResult() {
+        return status == OrderStatus.APPROVAL_REQUESTED;
+    }
+
+    public void markApprovalRequested() {
+        transitionTo(OrderStatus.APPROVAL_REQUESTED);
+    }
+
     public void markPaid() {
         transitionTo(OrderStatus.PAID);
         this.paidAt = LocalDateTime.now();
