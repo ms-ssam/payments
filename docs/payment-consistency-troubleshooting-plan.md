@@ -39,30 +39,38 @@
 
 ## 작업 순서
 
-### 1. 토스 클라이언트 타임아웃 (1-2)
-- `RestClient` 생성 시 connect/read 타임아웃 지정. 값은 토스 권장값 확인 후 결정.
-- 몇 줄짜리 독립 작업이고, 2번의 결과 분류가 connect/read timeout을 구분해 처리하므로 먼저 한다.
+### 1. 토스 클라이언트 타임아웃 (1-2) — 완료
+- connect 1.5초(공통), read 승인·취소 5초 / 결제 조회 3초. 토스 공식 권장값은 확인되지 않아 임의로 정한 값이며 운영 로그를 보며 조정한다.
 
-### 2. 승인 트랜잭션 분리 (1-1, 1-3, 2-1, 2-2, 2-3, 2-4)
+### 2. 승인 트랜잭션 분리 (1-1, 1-3, 2-1, 2-2, 2-3, 2-4) — 완료
 모든 결제가 거치는 경로라 효과가 가장 크다.
 ```
-[트랜잭션1] 상태·금액 검증 + 재고 차감 + 주문 PENDING → APPROVAL_REQUESTED, paymentKey 저장 → 커밋(락 해제)
-[트랜잭션 밖] 토스 confirm 호출
+[트랜잭션1] 주문 PENDING → APPROVAL_REQUESTED + 금액 검증 + 재고 차감 → 커밋(락 해제)
+[트랜잭션 밖] 토스 confirm 호출 (멱등키 orderId, 실패 시 1회 재요청)
 [트랜잭션2] 성공      → PAID + Payment 저장 + 원장 분개
             확정 실패 → FAILED + 재고 복구(명시적)
             결과 불명 → APPROVAL_REQUESTED 유지 (4번 배치가 정리)
 ```
+- **구조**: 트랜잭션 단계는 `PaymentApprovalProcessor`(`startApproval` / `completeApproval` / `failApproval`)에 두고, `PaymentService.confirmPayment`가 순서대로 호출한다. 같은 클래스 안에서 호출하면 `@Transactional`이 적용되지 않아 분리했다.
+- **멱등키 + 1회 재요청**: 토스 승인 요청에 `Idempotency-Key: orderId`를 보낸다. 같은 키로 다시 보내면 토스는 다시 처리하지 않고 첫 응답을 돌려주므로, connect timeout과 read timeout을 구분할 필요 없이 재요청으로 실제 결과를 받는다.
+  - `orderId`는 서버가 만든 UUID이고 실패한 주문은 다시 결제할 수 없어 주문당 승인 요청이 한 번뿐이라 그대로 쓴다. 한 주문에서 결제를 여러 번 시도할 수 있게 바뀌면 시도마다 별도 키를 만들어 저장해야 한다.
+  - 재요청은 Spring Framework 7 내장 `@Retryable`(`TossPaymentClientImpl.confirm`, 1초 뒤 1회)로 하고, 대상은 `TossRetryPredicate`가 정한다.
+  - 최악의 사용자 대기: 응답 없음 약 11초(5 + 1 + 5), 연결 실패 약 4초(1.5 + 1 + 1.5).
 - **결과 분류**: 결과 불명을 실패로 단정하지 않는다(2-4 해결).
 
-  | 분류 | 해당 경우 | 이유 |
+  | 토스 응답 | 재요청 | 최종 처리 |
   |---|---|---|
-  | 성공 | 토스 승인 응답 | |
-  | 확정 실패 | 토스 4xx 업무 에러(카드 거절 등), **connection timeout** | connection timeout은 연결 자체가 안 돼 요청이 토스에 도달하지 않았으므로 결과가 확실함 |
-  | 결과 불명 | **read timeout**, 응답 중 연결 끊김, 5xx, 에러 본문 파싱 실패, `ALREADY_PROCESSED_PAYMENT` | 요청은 토스에 도달했을 수 있어 실제 처리 여부를 모름 |
+  | 성공 | - | `PAID` |
+  | 4xx 업무 에러(카드 거절 등) | 안 함(다시 보내도 같음) | 확정 실패 → `FAILED` + 재고 복구 |
+  | 응답 못 받음(타임아웃·연결 실패), 5xx, `IDEMPOTENT_REQUEST_PROCESSING` | 1회 | 재요청도 실패하면 결과 불명 |
+  | `ALREADY_PROCESSED_PAYMENT` | 안 함(다른 키로 이미 처리된 결제라 다시 보내도 같음) | 결과 불명 |
+  - 에러 코드 판단은 `TossApiException.isDefiniteRejection()` / `isRetryable()`에 둔다(토스 쪽 지식이라 `PaymentService`가 알 필요 없음).
+  - 그 밖의 예외(코드 버그 등)는 잡지 않는다. 주문은 `APPROVAL_REQUESTED`로 남아 배치가 정리한다.
 - **상태 추가**: `OrderStatus`에 `APPROVAL_REQUESTED`. 토스 승인을 뜻하는 이름에 "CONFIRM"을 쓰지 않는다 — 구매확정(`CONFIRMED`)과 헷갈리기 때문.
-- **`paymentKey`를 트랜잭션1에서 저장**: 결과 불명 상태에서도 토스 결제 조회가 가능해야 하므로 Order에 저장(또는 요청 상태의 Payment를 먼저 생성).
-- **중복 콜백**: `APPROVAL_REQUESTED` 상태에 success 콜백이 다시 오면 토스를 다시 호출하지 않고 현재 상태를 반환. 트랜잭션1이 토스 호출 전에 커밋되므로 "토스는 승인됐는데 주문은 `PENDING`"인 상태가 생기지 않고, 기존 `ALREADY_PROCESSED_PAYMENT` 분기와 `increaseStock()`이 필요 없어진다(2-3 해결).
-- **트레이드오프**: 실패 시 롤백으로 재고가 저절로 복구되던 장점이 사라져, **재고 복구 코드를 직접 작성**해야 한다. 실패 기록도 트랜잭션2에서 하므로 `REQUIRES_NEW`가 필요 없어진다(1-3 해결).
+  - MySQL 네이티브 ENUM 컬럼은 `ddl-auto=update`가 값을 추가하지 않으므로 `ALTER TABLE orders MODIFY COLUMN status ENUM(...)`으로 수동 반영했다.
+- **상태 전이 규칙**: 허용되는 전이는 `OrderStatus.canTransitionTo()`에만 두고 `Order`의 상태 변경 메서드가 검사한다. "이미 처리된 요청을 어떻게 다룰지" 같은 유스케이스 판단은 `Order.isApprovalStartedOrDone()` / `isAwaitingApprovalResult()`로 서비스에 남긴다.
+- **중복 콜백**: `APPROVAL_REQUESTED`·`PAID` 상태에 success 콜백이 다시 오면 토스를 다시 호출하지 않고 현재 상태를 반환. 트랜잭션1이 토스 호출 전에 커밋되므로 "토스는 승인됐는데 주문은 `PENDING`"인 상태가 생기지 않고, 기존 `ALREADY_PROCESSED_PAYMENT` 분기와 `increaseStock()`이 필요 없어진다(2-3 해결).
+- **트레이드오프**: 실패 시 롤백으로 재고가 저절로 복구되던 장점이 사라져, **재고 복구 코드를 직접 작성**했다(`failApproval`). 금액 불일치·재고 부족은 트랜잭션1 롤백 후 `markFailed`로 따로 기록하므로 `REQUIRES_NEW`가 필요 없어졌다(1-3 해결).
 
 ### 3. 취소 트랜잭션 분리 (2-5, 2-6, 2-7)
 2번과 같은 패턴.
@@ -74,6 +82,7 @@
             결과 불명 → CANCEL_REQUESTED 유지 (4번 배치가 정리)
 ```
 - **상태 추가**: `OrderStatus`에 `CANCEL_REQUESTED`.
+- 승인과 같이 멱등키 + 1회 재요청을 적용한다. 지금은 전액 취소만 있어 주문 기반 키로 충분하지만, 부분 취소가 생기면 한 주문에 취소가 여러 번 일어나므로 취소 요청마다 별도 키를 만들어 저장해야 한다.
 - 환불 후 트랜잭션2가 실패해도 주문은 `CANCEL_REQUESTED`로 남는다. 재취소 요청은 `PAID`가 아니라서 토스까지 가지 않으므로 "이미 취소된 결제" 에러로 막히는 일이 없다(2-6 해결). 남은 정리는 4번 배치가 한다.
 - `CANCEL_REQUESTED` 동안은 상태가 `PAID`가 아니므로 구매확정이 막힌다(2-7 해결).
 
@@ -94,7 +103,6 @@
   - 실무에선 결과 불명 정리를 웹훅(빠름, 주력) + 대사 배치(놓친 것 정리, 안전망)로 함께 한다. 웹훅만으로는 우리 서버 다운·전달 실패 시 놓칠 수 있다.
   - 이 프로젝트에선 웹훅이 외부에서 접속 가능한 URL을 요구해(`localhost`는 ngrok 등 터널링 필요) 대사 배치를 먼저 만들고 웹훅은 나중에 붙인다. 같은 `reconcile()`을 쓰므로 순서를 바꿔도 다시 짤 부분은 없다.
   - 어떤 결제수단·상태 변화에 웹훅이 오는지는 토스 문서에서 확인 필요.
-- **`Idempotency-Key`**: 토스 승인·취소 재시도 시 중복 처리 방지.
 
 ## 순서별 해결 범위
 
@@ -108,6 +116,6 @@
 
 ## 검증
 - 1: 토스 응답 지연을 흉내 냈을 때 설정한 시간 안에 예외로 끝나는지 확인.
-- 2: 토스 응답 지연 중 같은 상품의 다른 결제가 대기 없이 진행되는지 확인. `TossPaymentClient` stub으로 성공/확정 실패/결과 불명 각각의 최종 상태·재고·원장 확인. 진행 중 상태에서 success 콜백 재도달 시 토스를 다시 호출하지 않는지 확인.
+- 2: 가짜 토스 서버로 확인 완료 — 성공, 카드 거절(재요청 없음), 5xx 지속(재요청 후 결과 불명), `ALREADY_PROCESSED_PAYMENT`(재요청 없이 결과 불명), 첫 요청 응답 없음 → 재요청 성공, 409 처리 중 → 재요청 성공, 응답 계속 없음(결과 불명), 진행 중 주문에 콜백 재도달(토스 호출 없음), 금액 불일치, 재고 부족. 재요청 시 같은 멱등키가 나가는지, 각 경우의 최종 상태·재고·Payment·원장이 맞는지 확인.
 - 3: stub으로 성공/확정 실패/결과 불명 각각의 최종 상태·재고·원장·환수 확인. `CANCEL_REQUESTED` 중 구매확정·재취소가 거부되는지 확인.
 - 4: 진행 중 상태로 남긴 주문이 배치 실행 후 토스 상태와 일치하는지 확인.
