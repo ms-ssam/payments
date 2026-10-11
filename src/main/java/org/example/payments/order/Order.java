@@ -9,6 +9,7 @@ import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.Index;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.OneToMany;
@@ -23,7 +24,8 @@ import lombok.NoArgsConstructor;
 import org.example.payments.buyer.Buyer;
 
 @Entity
-@Table(name = "orders") // MySQL 예약어인 order 회피
+// MySQL 예약어인 order 회피. status 인덱스는 대사 배치가 진행 중 상태 주문만 찾을 때 풀스캔을 피하기 위함
+@Table(name = "orders", indexes = @Index(name = "idx_orders_status", columnList = "status"))
 @Getter
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 public class Order {
@@ -56,6 +58,10 @@ public class Order {
 
     private LocalDateTime confirmedAt;
 
+    // 상태가 마지막으로 바뀐 시각 — 대사 배치가 "진행 중 상태로 오래 머문 주문"만 골라낼 때 쓴다.
+    // createdAt·paidAt으로는 승인·취소를 언제 시작했는지 알 수 없어서 따로 둔다
+    private LocalDateTime statusChangedAt;
+
     // 낙관적 락: 동일 주문에 대한 동시 상태 갱신(중복 confirm 등) 충돌 감지용, Hibernate가 자동 관리
     @Version
     private Long version;
@@ -70,6 +76,7 @@ public class Order {
         this.totalAmount = totalAmount;
         this.status = OrderStatus.PENDING;
         this.createdAt = LocalDateTime.now();
+        this.statusChangedAt = this.createdAt;
     }
 
     public void addItem(OrderItem item) {
@@ -138,5 +145,6 @@ public class Order {
             throw new InvalidOrderStateException(orderId, status);
         }
         this.status = next;
+        this.statusChangedAt = LocalDateTime.now();
     }
 }

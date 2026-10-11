@@ -65,10 +65,11 @@ public class TossPaymentClientImpl implements TossPaymentClient {
                 .body(TossPaymentResponse.class);
     }
 
+    // 조회는 대사 배치가 다음 주기에 다시 하므로 재요청(@Retryable)을 두지 않는다
     @Override
-    public TossPaymentResponse getPayment(String paymentKey) {
+    public TossPaymentResponse getPaymentByOrderId(String orderId) {
         return inquiryClient.get()
-                .uri("/v1/payments/{paymentKey}", paymentKey)
+                .uri("/v1/payments/orders/{orderId}", orderId)
                 .retrieve()
                 .body(TossPaymentResponse.class);
     }

@@ -27,5 +27,8 @@ app:
   base-url: http://localhost:8080  #  나중에 컨트롤러에서 successUrl/failUrl 만들 때 사용할 값
 
 payments:
+  reconciliation:
+    interval: 5m          # 대사 배치 실행 주기
+    reconcile-after: 5m   # 진행 중 상태로 이 시간이 지난 주문부터 대사 (원래 요청은 길어야 약 11초면 끝남)
   settlement:
     fee-rate: 0.029   # 학습용 고정값. 실제 Toss 수수료와 무관함(실무에선 PG가 계산해 알려주는 값)
