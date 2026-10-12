@@ -14,6 +14,8 @@ Java 21 · Spring Boot 4.1 · Spring Data JPA · MySQL · Thymeleaf · RestClien
 |---|---|
 | 주문·결제 | 상품 조회, 주문 생성, 위젯 결제, 승인(confirm)/실패 콜백 처리 |
 | 취소(환불) | 결제 완료 건 취소 → Toss cancel 호출 + 재고 복구 |
+| 토스 호출 처리 | DB 트랜잭션과 토스 호출 분리, 멱등키 + 1회 재요청, 결과를 알 수 없으면 진행 중 상태로 남김 |
+| 대사 배치 | 진행 중 상태로 남은 주문을 주기적으로 토스 결제 조회로 확인해 실제 상태에 맞춤 |
 | 선수금 | 결제 승인 시점엔 **선수금(부채)**, 구매확정 시점에 **매출**로 전환 |
 | 정산 | PG 정산을 시뮬레이션하는 배치(수수료 차감), 정산 후 취소분은 **환수(clawback)** 해 다음 정산에서 상계 |
 | 원장 | **복식부기** 원장. 모든 분개는 `차변 합 = 대변 합` 검증을 통과해야 저장 |
@@ -22,8 +24,9 @@ Java 21 · Spring Boot 4.1 · Spring Data JPA · MySQL · Thymeleaf · RestClien
 ## 흐름 한눈에 보기
 
 ```
-주문 생성(PENDING) ─▶ 위젯 결제 ─▶ 승인(PAID) ─┬─▶ 구매확정(CONFIRMED)   선수금 → 매출
-                                              └─▶ 취소(CANCELED)        재고 복구, 정산 후라면 환수
+주문 생성(PENDING) ─▶ 위젯 결제 ─▶ 승인 요청(APPROVAL_REQUESTED) ─▶ 승인(PAID) ─┬─▶ 구매확정(CONFIRMED)   선수금 → 매출
+                                                                            └─▶ 취소 요청(CANCEL_REQUESTED) ─▶ 취소(CANCELED)   재고 복구, 정산 후라면 환수
+대사 배치: 토스 결과를 모른 채 진행 중 상태로 남은 주문 → 토스에 조회해 PAID/FAILED/CANCELED 등으로 정리
 정산 배치: 미수금 → 현금 + 수수료 (대기 중인 환수분 상계)
 ```
 
@@ -69,5 +72,6 @@ Java 21 · Spring Boot 4.1 · Spring Data JPA · MySQL · Thymeleaf · RestClien
 
 설계 배경, 시퀀스 다이어그램, 수동 테스트 가이드는 [`docs/`](docs)에 있습니다.
 
-- [결제위젯 연동 계획](docs/payment-widget-integration-plan.md) · [결제/취소 흐름](docs/payment-flow-sequence.md)
+- [결제위젯 연동 계획](docs/payment-widget-integration-plan.md) · [결제·취소·대사 흐름](docs/payment-flow-sequence.md)
 - [선수금·정산·원장 계획](docs/settlement-ledger-plan.md) · [정산·원장 흐름](docs/settlement-ledger-flow-sequence.md)
+- [결제 정합성 개선(트러블슈팅) 계획](docs/payment-consistency-troubleshooting-plan.md)

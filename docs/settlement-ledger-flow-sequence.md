@@ -10,9 +10,9 @@ sequenceDiagram
     participant B as 브라우저(클라이언트)
     participant S as 서버(payments)
 
-    Note over B,S: /payments/success 콜백까지는 기존 결제 성공 흐름과 동일
+    Note over B,S: 토스 승인 성공까지는 docs/payment-flow-sequence.md의 승인 흐름과 동일
 
-    S->>S: PaymentService.markPaid() - order.markPaid(), Payment 저장
+    S->>S: PaymentApprovalProcessor.completeApproval() (트랜잭션2) - 주문 PAID, Payment 저장
     S->>S: LedgerService.postPaymentApproved(paymentId, amount)
     Note over S: 차변 RECEIVABLE_SETTLEMENT(미수금) / 대변 UNEARNED_REVENUE(선수금)<br/>아직 매출 아님 — 구매확정 전까지는 선수금(부채)
     S-->>B: 200 {orderId, status:"PAID", amount}
@@ -27,10 +27,10 @@ sequenceDiagram
     participant S as 서버(payments)
 
     B->>S: POST /payments/{orderId}/confirm
-    S->>S: PaymentService.confirmPurchase() - order.status==PAID 확인
+    S->>S: PaymentService.confirmPurchase() - order.markConfirmed()가 상태 전이 규칙으로 PAID인지 검사
 
-    alt 주문이 PAID가 아님 (PENDING/CONFIRMED/FAILED/CANCELED)
-        S-->>B: 409 {message: 이미 종결된 주문이라 처리할 수 없습니다}
+    alt 주문이 PAID가 아님 (PENDING/APPROVAL_REQUESTED/CANCEL_REQUESTED/CONFIRMED/FAILED/CANCELED)
+        S-->>B: 409 {message: 현재 주문 상태에서는 처리할 수 없습니다}
     else 주문이 PAID
         S->>S: order.markConfirmed()
         S->>S: LedgerService.postPurchaseConfirmed(paymentId, amount)
@@ -39,7 +39,7 @@ sequenceDiagram
     end
 ```
 
-구매확정된 주문은 이후 `POST /payments/{orderId}/cancel`을 호출해도 `status != PAID` 가드에 걸려 취소되지 않는다(기존 취소 가드를 그대로 재사용, 별도 수정 없음).
+상태 전이 규칙(`OrderStatus.canTransitionTo()`)상 취소는 `PAID`에서만 시작할 수 있어, 구매확정된 주문은 취소되지 않는다. 반대로 취소가 진행 중(`CANCEL_REQUESTED`)인 주문도 `PAID`가 아니라서 구매확정되지 않는다.
 
 ## 3. 정산 배치 실행
 
@@ -75,7 +75,8 @@ sequenceDiagram
     participant S as 서버(payments)
 
     B->>S: POST /payments/{orderId}/cancel {cancelReason}
-    S->>S: PaymentService.cancelPayment() - 기존 흐름(토스 환불, 주문/결제 상태변경, 재고복구) 동일
+    Note over B,S: CANCEL_REQUESTED → 토스 환불 성공까지는 docs/payment-flow-sequence.md의 취소 흐름과 동일
+    S->>S: PaymentCancelProcessor.completeCancel() (트랜잭션2) - 주문·결제 CANCELED, 재고 복구
     S->>S: SettlementService.isSettled(payment)?
 
     alt 정산 전
@@ -115,7 +116,7 @@ curl localhost:8080/receivables
 구매확정 후 취소 가드 확인:
 ```bash
 curl -X POST localhost:8080/payments/{CONFIRMED상태orderId}/cancel -H "Content-Type: application/json" -d '{"cancelReason":"단순 변심"}'
-# → 409, "이미 종결된 주문이라 처리할 수 없습니다"
+# → 409, "현재 주문 상태에서는 처리할 수 없습니다"
 ```
 
 ### 5.3 정산 배치 확인
